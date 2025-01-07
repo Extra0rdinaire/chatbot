@@ -1,0 +1,289 @@
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+from metrics import *
+from utils import *
+from collections import Counter
+
+def heatmap_visualisation(
+    df,
+    figsize:tuple=None,
+    annot:bool=True,
+    annot_fmt:str=".3f",
+    cmap="cividis",
+):
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(df, cmap=cmap)
+
+    # Show all ticks and label them with the respective list entries
+    label_rows = list(df.index)
+    label_cols = list(df.columns)
+    ax.set_xticks(range(len(label_cols)), labels=label_cols,
+                rotation=45, ha="right", rotation_mode="anchor")
+    ax.set_yticks(range(len(label_rows)), labels=label_rows)
+
+    # Loop over data dimensions and create text annotations.
+    if annot:
+        for i in range(len(label_rows)):
+            for j in range(len(label_cols)):
+                text = ax.text(j, i, format(df.iloc[i, j],annot_fmt),
+                            ha="center", va="center", color="w")
+    return fig, ax
+
+st.title("LLM Citation Diversity Dashboard")
+
+uploaded_files = st.file_uploader("Upload Citation Datasets (CSV, Multiple Files Allowed)", type=["csv"], accept_multiple_files=True)
+if uploaded_files:
+    basic_statistics = []
+    metric_results = []
+    datasets = {}
+
+    for file in uploaded_files:
+        label = st.text_input(f"Enter label for {file.name}", value=file.name)
+        data = load_results(path_to_csv=file)
+        citations = get_feature_flattened(data)
+        datasets[label] = citations
+
+        # basic statistics
+        basic_statistics.append({
+            "Label": label,
+            "Number of Authors": len(citations),
+            "Unique Authors": len(set(citations)),
+            "Prop. 3 authors": sum([len(a)==3 for a in data["sociologists"]])/len(data)
+        })
+
+        # metrics
+        entropy = shannon_entropy(citations)
+        gini = gini_index(citations)
+        dominance = dominance_index(citations)
+        hhi = herfindahl_hirschman_index(citations)
+        evenness = evenness_index(citations)
+
+        metric_results.append({
+            "Label": label,
+            "Shannon Entropy": entropy,
+            "Gini Index": gini,
+            "Dominance Index": dominance,
+            "HHI": hhi,
+            "Evenness": evenness
+        })
+
+    # Display Basic Statistics
+    st.subheader("Datasets statistics")
+    basic_df = pd.DataFrame(basic_statistics)
+    st.dataframe(basic_df)
+
+    # Display Comparison Table
+    st.markdown("""
+        ### Metrics Overview
+    """)
+
+    metrics_help = {
+        "Shannon Entropy": {
+            "desc":"Measures overall diversity of citations.",
+            "link":"https://en.wikipedia.org/wiki/Entropy_(information_theory)",
+        },
+        "Gini Index": {
+            "desc":"Indicates inequality in citation distribution.",
+            "link":"https://en.wikipedia.org/wiki/Gini_coefficient",
+        },
+        "Dominance Index": {
+            "desc":"Proportion of citations dominated by the top 5 authors.",
+            #"link":"https://en.wikipedia.org/wiki/Dominance_measure",
+        },
+        "Herfindahl-Hirschman Index (HHI)": {
+            "desc":"Measures concentration of citations.",
+            "link":"https://en.wikipedia.org/wiki/Herfindahl_index",
+        },
+        "Evenness Index": {
+            "desc":"Reflects how evenly citations are distributed (normalized entropy).",
+            "link":"https://en.wikipedia.org/wiki/Species_evenness",
+        },
+        "Jaccard Similarity": {
+            "desc":"Measures the overlap between two datasets.",
+            "link":"https://en.wikipedia.org/wiki/Jaccard_index"
+        },
+    }
+
+    for metric, link in metrics_help.items():
+        st.markdown(
+            f"**{metric}**: {metrics_help[metric]['desc']}", 
+            help=f"[Learn more about {metric}]({metrics_help[metric]['link']})" if 'link' in metrics_help[metric].keys() else None
+        )
+
+    st.subheader("Comparison of Diversity Metrics")
+    comparison_df = pd.DataFrame(metric_results)
+    st.dataframe(comparison_df)
+
+    # Visualization
+    st.subheader("Metrics Comparison Visualization")
+    metric_to_plot = st.selectbox("Select Metric to Visualize", options=["Shannon Entropy", "Gini Index", "Dominance Index", "HHI", "Evenness"])
+    if metric_to_plot:
+        fig = comparison_df.plot(x="Label", y=metric_to_plot, kind="bar", legend=False, title=f"Comparison of {metric_to_plot}").get_figure()
+        st.pyplot(fig)
+
+    # Proportion of Citations vs. Authors Plot with Highlighted X-Ticks
+    st.subheader("Proportion of Total Citations vs. Proportion of Authors")
+
+    if datasets:
+        target_proportion = st.slider("Select Proportion of Total Citations to Highlight", 0.1, 1.0, 0.5)
+        plot_data = {}
+        highlights = {}
+
+        for label, citations in datasets.items():
+            counts = Counter(citations)
+            sorted_counts = sorted(counts.values(), reverse=True)
+            cumulative_citations = pd.Series(sorted_counts).cumsum()
+            total_citations = cumulative_citations.iloc[-1]
+            proportion_citations = cumulative_citations / total_citations
+            proportion_authors = pd.Series(range(1, len(sorted_counts) + 1)) / len(sorted_counts)
+            
+            plot_data[label] = {
+                "Proportion Authors": proportion_authors,
+                "Proportion Citations": proportion_citations
+            }
+
+            # Find the x-value (proportion of authors) for the target proportion of total citations
+            highlight_index = (proportion_citations >= target_proportion).idxmax()
+            highlights[label] = proportion_authors.iloc[highlight_index]
+
+        # Plot using Matplotlib
+        fig, ax = plt.subplots(figsize=(7, 7))
+        colors = plt.cm.tab10.colors  # Use a colormap for dataset colors
+        x_tick_labels = []
+
+        for i, (label, data) in enumerate(plot_data.items()):
+            color = colors[i % len(colors)]
+            ax.plot(data["Proportion Authors"], data["Proportion Citations"], label=label, color=color)
+            
+            # Highlight the target proportion
+            x_value = highlights[label]
+            ax.axvline(x_value, color=color, linestyle='--', linewidth=0.8)
+            
+            # Add custom x-tick
+            x_tick_labels.append((x_value, label, color))
+        
+        # Add colored x-ticks
+        x_ticks, x_labels, x_colors = zip(*x_tick_labels)
+        ax.set_xticks(list(ax.get_xticks()) + list(x_ticks))
+        ax.set_xticklabels(
+            [f"{tick:.2f}" if tick in x_ticks else f"{tick:.2f}" for tick in ax.get_xticks()],
+            rotation=45, ha='right'
+        )
+        
+        # Add custom tick colors
+        for tick, label, color in zip(x_ticks, x_labels, x_colors):
+            tick_index = list(ax.get_xticks()).index(tick)
+            ax.get_xticklabels()[tick_index].set_color(color)
+
+        ax.set_xlim([0,1])
+        ax.set_ylim([0,1])
+        ax.set_box_aspect(1)
+        ax.set_title("Proportion of Total Citations vs. Proportion of Authors")
+        ax.set_xlabel("Proportion of Authors")
+        ax.set_ylabel("Proportion of Total Citations")
+        ax.legend(title="Datasets", loc="lower right")
+        st.pyplot(fig)
+
+        # Jaccard Similarity Analysis
+        if len(datasets) > 1:
+            st.subheader("Inter-Dataset Similarity")
+            labels = list(datasets.keys())
+            jaccard_matrix = []
+            for i, label1 in enumerate(labels):
+                row = []
+                for j, label2 in enumerate(labels):
+                    if i == j:
+                        row.append(1.0)
+                    else:
+                        similarity = jaccard_similarity(datasets[label1], datasets[label2])
+                        row.append(similarity)
+                jaccard_matrix.append(row)
+
+            jaccard_df = pd.DataFrame(jaccard_matrix, index=labels, columns=labels)
+            st.write("Jaccard Similarity Matrix")
+            st.dataframe(jaccard_df)
+
+            # Heatmap Visualization
+            st.subheader("Jaccard Similarity Heatmap")
+            fig, ax = heatmap_visualisation(jaccard_df)
+            st.pyplot(fig)
+
+
+        # Most Cited Authors Across Datasets
+        st.subheader("Top-N Authors Across Datasets")
+        top_n = st.slider("Select Top N Authors", min_value=1, max_value=20, value=3)
+        annotation_type = st.selectbox("Annotation Type", options=["Number of Citations", "Rank"], index=0)
+
+        # Prepare Data for Visualization
+        all_counts = {}
+        for label, citations in datasets.items():
+            counts = Counter(citations)
+            all_counts[label] = counts
+
+        # Create Cross-Dataset Data
+        authors_union = set()
+        for counts in all_counts.values():
+            authors_union.update(counts.keys())
+
+        presence_data = []
+        for author in authors_union:
+            row = {"Author": author}
+            for label, counts in all_counts.items():
+                if annotation_type == "Number of Citations":
+                    row[label] = counts.get(author, 0)
+                elif annotation_type == "Rank":
+                    sorted_authors = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+                    ranks = {a: i + 1 for i, (a, _) in enumerate(sorted_authors)}
+                    row[label] = ranks.get(author, float('inf'))
+            presence_data.append(row)
+
+        presence_df = pd.DataFrame(presence_data).set_index("Author")
+
+        # Filter for Top-N Authors Based on Aggregate Citations
+        top_authors = list(set(
+            [
+                name 
+                for lab in presence_df.columns
+                for name in presence_df[lab].nlargest(top_n).index
+            ]
+        ))
+        #top_authors = presence_df.sum(axis=1).nlargest(top_n).index
+        if annotation_type=="Rank":
+            top_authors = list(set(
+                [
+                    name 
+                    for lab in presence_df.columns
+                    for name in presence_df[lab].nsmallest(top_n).index
+                ]
+            ))
+        filtered_df = presence_df.loc[top_authors]
+        filtered_df['sum'] = filtered_df.sum(axis=1)  
+        filtered_df = filtered_df.sort_values("sum", ascending=annotation_type=="Rank").drop("sum", axis=1) 
+
+    # Reverse Rank for Heatmap (Proper Rank Annotation)
+        if annotation_type == "Rank":
+            for label in datasets.keys():
+                counts = Counter(datasets[label])
+                sorted_authors = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+                ranks = {a: i + 1 for i, (a, _) in enumerate(sorted_authors)}
+                filtered_df[label] = [ranks.get(author, len(sorted_authors) + 1) for author in filtered_df.index]
+
+        # Heatmap Visualization for Author Presence
+        st.subheader("Cross-Dataset Top-N Author Presence Heatmap")
+        fig, ax = heatmap_visualisation(
+            df=filtered_df,
+            figsize=(10, len(filtered_df) * 0.5),
+            cmap="coolwarm",
+            annot_fmt=".0f"
+        )
+        st.pyplot(fig)
+
+        # Highlight Specific Author Occurrences
+        author_to_highlight = st.text_input("Enter Author Name to Highlight")
+        if author_to_highlight:
+            if author_to_highlight in presence_df.index:
+                st.write(f"Author '{author_to_highlight}' Presence Across Datasets:")
+                st.write(presence_df.loc[[author_to_highlight]])
+            else:
+                st.warning(f"Author '{author_to_highlight}' not found in the datasets.")
